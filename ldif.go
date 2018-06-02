@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
 	"gopkg.in/ldap.v2"
 )
 
@@ -36,6 +37,10 @@ type LDIF struct {
 	Controls   bool
 	firstEntry bool
 }
+
+// EntryCallback defines a callback function that receives a single parsed
+// Entry from the LDIF file
+type EntryCallback func(*Entry) error
 
 // The ParseError holds the error message and the line in the ldif
 // where the error occurred.
@@ -72,8 +77,8 @@ func ParseWithControls(str string) (l *LDIF, err error) {
 	err = Unmarshal(buf, l)
 	return
 }
-func iterLines(r io.Reader, ch chan *Entry, l *LDIF){
-	var err error
+
+func iterLines(r io.Reader, cb EntryCallback, l *LDIF) (err error) {
 	var lines []string
 	var line, nextLine string
 	isComment := false
@@ -89,8 +94,8 @@ func iterLines(r io.Reader, ch chan *Entry, l *LDIF){
 			switch len(nextLine) {
 			case 0:
 				if len(line) == 0 && err == io.EOF {
-					close(ch)
-					return 
+					// close(ch)
+					return
 				}
 				if len(line) == 0 && len(lines) == 0 {
 					continue
@@ -98,16 +103,16 @@ func iterLines(r io.Reader, ch chan *Entry, l *LDIF){
 				lines = append(lines, line)
 				entry, perr := l.parseEntry(lines)
 				if perr != nil {
-					ch <- &Entry{Err: &ParseError{Line: curLine, Message: perr.Error()} }
-				}else{
-					ch <- entry
+					cb(&Entry{Err: &ParseError{Line: curLine, Message: perr.Error()}})
+				} else {
+					cb(entry)
 				}
 				//l.Entries = append(l.Entries, entry)
 				line = ""
 				lines = []string{}
 				if err == io.EOF {
-					close(ch)
-					return 
+					// close(ch)
+					return
 				}
 			default:
 				switch nextLine[0] {
@@ -132,39 +137,33 @@ func iterLines(r io.Reader, ch chan *Entry, l *LDIF){
 				}
 			}
 		default:
-			ch <- &Entry{Err: &ParseError{Line: curLine, Message: err.Error()} }
-			close(ch)
-			return 
+			cb(&Entry{Err: &ParseError{Line: curLine, Message: err.Error()}})
+			return
 		}
-	}	
-}
-func UnmarshalBuffer(r io.Reader, l *LDIF) (error, chan *Entry) {
-	if r == nil {
-		return &ParseError{Line: 0, Message: "No reader present"}, nil
 	}
-	ch := make (chan *Entry)
+}
+
+func UnmarshalBuffer(r io.Reader, l *LDIF, cb EntryCallback) error {
+	if r == nil {
+		return &ParseError{Line: 0, Message: "No reader present"}
+	}
 	l.Version = 0
 	l.changeType = ""
 	l.firstEntry = true
-	go iterLines(r, ch, l);
-	return nil, ch
+	return iterLines(r, cb, l)
 }
+
 // Unmarshal parses the LDIF from the given io.Reader into the LDIF struct.
 // The caller is responsible for closing the io.Reader if that is
 // needed.
-func Unmarshal(r io.Reader, l *LDIF) (error) {
-	err, channel := UnmarshalBuffer(r, l)
-	if err != nil {
-		return err
-	}
-	for entry := range channel {
-		if entry.Err != nil {
-			return entry.Err
-		}else{
-			l.Entries = append(l.Entries, entry)
+func Unmarshal(r io.Reader, l *LDIF) error {
+	return UnmarshalBuffer(r, l, func(e *Entry) error {
+		if e.Err != nil {
+			return e.Err
 		}
-	}
-	return nil
+		l.Entries = append(l.Entries, e)
+		return nil
+	})
 }
 
 func (l *LDIF) parseEntry(lines []string) (entry *Entry, err error) {
